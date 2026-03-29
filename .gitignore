@@ -1,4 +1,6 @@
 frontend/node_modules/
+frontend/dist/*
+!frontend/dist/.gitkeep
 build/bin/
 build/windows/installer/tmp/
 build/windows/installer/wails_tools.nsh
