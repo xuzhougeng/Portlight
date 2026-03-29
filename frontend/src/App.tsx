@@ -24,9 +24,8 @@ import type {
 } from "./types";
 
 type ThemeMode = "light" | "dark";
-type ViewerMode = "preview" | "terminal";
 type DownloadStatus = "idle" | "downloading" | "completed" | "cancelled";
-type ShellTab = "server" | "workspace";
+type ShellTab = "server" | "workspace" | "terminal";
 
 type DesktopBackend = {
   SaveRemoteFile: (sessionId: string, remotePath: string) => Promise<string>;
@@ -445,7 +444,6 @@ export default function App() {
   const [form, setForm] = useState(defaultForm);
   const [sidebarWidth, setSidebarWidth] = useState(() => readStoredSidebarWidth());
   const [theme, setTheme] = useState<ThemeMode>(() => readStoredTheme());
-  const [viewerMode, setViewerMode] = useState<ViewerMode>("preview");
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(null);
   const [savedProfiles, setSavedProfiles] = useState<SavedConnectionProfile[]>(
     []
@@ -949,8 +947,7 @@ export default function App() {
     throw uploadError;
   }
 
-  async function handleConnect(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function connectWithConfig(config: ConnectionConfig) {
     setIsConnecting(true);
     setError("");
     setTransferNotice("");
@@ -964,14 +961,14 @@ export default function App() {
         "/api/session",
         {
           body: JSON.stringify({
-            authMethod: form.authMethod,
-            host: form.host,
+            authMethod: config.authMethod,
+            host: config.host,
             password:
-              form.authMethod === "password" ? form.password : undefined,
+              config.authMethod === "password" ? config.password : undefined,
             privateKey:
-              form.authMethod === "key" ? form.privateKey : undefined,
-            port: form.port,
-            username: form.username
+              config.authMethod === "key" ? config.privateKey : undefined,
+            port: config.port,
+            username: config.username
           }),
           headers: {
             "Content-Type": "application/json"
@@ -980,43 +977,46 @@ export default function App() {
         }
       );
 
-      if (form.authMethod === "password") {
-        if (form.rememberPassword) {
-          saveStoredPassword(form.host, payload.username, form.password);
+      if (config.authMethod === "password") {
+        if (config.rememberPassword) {
+          saveStoredPassword(config.host, payload.username, config.password);
         } else {
-          removeStoredPassword(form.host, payload.username);
+          removeStoredPassword(config.host, payload.username);
         }
       }
 
       const nextSession: ActiveSession = {
         authMethod: payload.authMethod,
-        host: form.host,
+        host: config.host,
         hostname: payload.hostname,
         port: String(payload.port),
-        rootPath: form.rootPath,
+        rootPath: config.rootPath,
         sessionId: payload.sessionId,
         username: payload.username
       };
 
-      setForm((value) => ({
-        ...value,
-        password: value.authMethod === "password" ? value.password : "",
+      setForm({
+        authMethod: config.authMethod,
+        host: config.host,
+        password: config.authMethod === "password" ? config.password : "",
+        privateKey: config.authMethod === "key" ? config.privateKey : "",
         port: String(payload.port),
+        rememberPassword:
+          config.authMethod === "password" ? config.rememberPassword : false,
+        rootPath: config.rootPath,
         username: payload.username
-      }));
+      });
 
       startTransition(() => {
         setActiveSession(nextSession);
         setCurrentDir("");
         setEntries([]);
         setFileFilter("");
-        setPathDraft(form.rootPath);
+        setPathDraft(config.rootPath);
         setSelectedFile(null);
-        setViewerMode("preview");
       });
 
-      await loadDirectory(nextSession, form.rootPath, { clearSelection: true });
-      setIsConnectionPanelCollapsed(true);
+      await loadDirectory(nextSession, config.rootPath, { clearSelection: true });
       setShellTab("workspace");
 
       if (previousSessionId && previousSessionId !== nextSession.sessionId) {
@@ -1029,6 +1029,38 @@ export default function App() {
     } finally {
       setIsConnecting(false);
     }
+  }
+
+  async function handleQuickConnect(profile: SavedConnectionProfile) {
+    const password =
+      profile.authMethod === "password"
+        ? readStoredPassword(profile.host, profile.username) || ""
+        : "";
+
+    applySavedProfile(profile.id);
+
+    if (profile.authMethod === "password" && !password) {
+      setProfilesNotice("");
+      setProfilesError("该配置未保存密码，请在右侧补全密码后再连接。");
+      return;
+    }
+
+    await connectWithConfig({
+      authMethod: profile.authMethod,
+      host: profile.host,
+      password,
+      privateKey: profile.privateKey,
+      port: profile.port,
+      rememberPassword:
+        profile.authMethod === "password" ? profile.rememberPassword : false,
+      rootPath: profile.rootPath,
+      username: profile.username
+    });
+  }
+
+  function handleConnect(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void connectWithConfig(form);
   }
 
   function handlePathSubmit(event: FormEvent<HTMLFormElement>) {
@@ -1378,7 +1410,7 @@ export default function App() {
     (form.username && form.host
       ? `${form.username}@${form.host}`
       : form.host || "新连接");
-  const viewerTitle = viewerMode === "terminal" ? "终端区" : "预览区";
+  const previewTitle = "预览区";
   const sessionSummary = activeSession
     ? `${activeSession.username}@${activeSession.hostname}:${activeSession.port}`
     : "";
@@ -1389,14 +1421,7 @@ export default function App() {
       ? `已选择配置：${selectedProfile.name}`
       : "先填写 SSH 连接信息，再读取远程目录";
   const browserPathLabel = currentDir || "-";
-  const viewerPathLabel =
-    viewerMode === "terminal"
-      ? activeSession
-        ? currentDir || activeSession.rootPath || "/"
-        : "先建立 SSH 会话后再执行命令"
-      : selectedFile
-        ? selectedFile.path
-        : "尚未选择文件";
+  const previewPathLabel = selectedFile ? selectedFile.path : "尚未选择文件";
   const downloadProgressPercent =
     downloadTotalBytes && downloadTotalBytes > 0
       ? Math.min(downloadLoadedBytes / downloadTotalBytes, 1) * 100
@@ -1442,13 +1467,18 @@ export default function App() {
       : error && isPasswordRelatedError(error)
         ? error
         : form.password
-          ? "点击“连接并读取目录”后会立即校验密码。"
+          ? "点击“连接并进入工作台”后会立即校验密码。"
           : "请输入 SSH 密码。";
   const isPasswordStatusError =
     !isConnecting && Boolean(error) && isPasswordRelatedError(error);
   const navStatusLabel = activeSession ? sessionSummary : "未连接";
   const navDetailLabel =
-    shellTab === "server" ? "配置服务器" : currentDir || "远程工作台";
+    shellTab === "server"
+      ? "配置服务器"
+      : shellTab === "terminal"
+        ? "远程终端"
+        : currentDir || "远程工作台";
+  const primaryConnectLabel = activeSession ? "重新连接并刷新工作台" : "连接并进入工作台";
 
   return (
     <div className="app-shell">
@@ -1484,7 +1514,21 @@ export default function App() {
             <span className="app-nav-icon">WK</span>
             <span className="app-nav-copy">
               <strong>工作台</strong>
-              <small>浏览、预览与终端</small>
+              <small>浏览与文件预览</small>
+            </span>
+          </button>
+          <button
+            className={`app-nav-item ${shellTab === "terminal" ? "is-active" : ""}`}
+            onClick={() => {
+              setShellTab("terminal");
+              setIsConnectionPanelCollapsed(true);
+            }}
+            type="button"
+          >
+            <span className="app-nav-icon">TM</span>
+            <span className="app-nav-copy">
+              <strong>终端</strong>
+              <small>Xterm 可视化命令台</small>
             </span>
           </button>
         </nav>
@@ -1528,29 +1572,31 @@ export default function App() {
           } as CSSProperties
         }
       >
-        <section className="sidebar">
-          <form
-            className={`panel connection-panel light-panel ${
-              isConnectionPanelCollapsed ? "is-collapsed" : ""
-            }`}
-            onSubmit={handleConnect}
-          >
-            <div className="panel-header">
-              <div>
-                <div className="section-title">连接参数</div>
-                <div className="panel-subtitle" title={connectionSummary}>
-                  {connectionSummary}
-                </div>
-              </div>
-              <button
-                onClick={() =>
-                  setIsConnectionPanelCollapsed((value) => !value)
-                }
-                type="button"
+        {shellTab !== "terminal" ? (
+          <section className="sidebar">
+            {shellTab === "server" ? (
+              <form
+                className={`panel connection-panel light-panel ${
+                  isConnectionPanelCollapsed ? "is-collapsed" : ""
+                }`}
+                onSubmit={handleConnect}
               >
-                {isConnectionPanelCollapsed ? "展开" : "收起"}
-              </button>
-            </div>
+              <div className="panel-header">
+                <div>
+                  <div className="section-title">连接参数</div>
+                  <div className="panel-subtitle" title={connectionSummary}>
+                    {connectionSummary}
+                  </div>
+                </div>
+                <button
+                  onClick={() =>
+                    setIsConnectionPanelCollapsed((value) => !value)
+                  }
+                  type="button"
+                >
+                  {isConnectionPanelCollapsed ? "展开" : "收起"}
+                </button>
+              </div>
 
             {!isConnectionPanelCollapsed ? (
               <>
@@ -1777,7 +1823,7 @@ export default function App() {
                     disabled={isBusy}
                     type="submit"
                   >
-                    {isConnecting ? "连接中" : "连接并读取目录"}
+                    {isConnecting ? "连接中" : primaryConnectLabel}
                   </button>
                   <button
                     disabled={!activeSession}
@@ -1796,7 +1842,6 @@ export default function App() {
                       stopDownload({ reset: true });
                       setPathDraft(form.rootPath);
                       setSelectedFile(null);
-                      setViewerMode("preview");
                       setIsConnectionPanelCollapsed(false);
                       setShellTab("server");
                     }}
@@ -1844,188 +1889,238 @@ export default function App() {
                 </small>
               </div>
             ) : null}
-          </form>
+              </form>
+            ) : null}
 
-          <section className="panel browser-panel light-panel">
-            <div className="browser-header">
-              <div>
-                <div className="section-title">远程文件</div>
-                <div className="current-path" title={browserPathLabel}>
-                  {browserPathLabel}
+            {shellTab === "workspace" ? (
+              <section className="panel browser-panel light-panel">
+              <div className="browser-header">
+                <div>
+                  <div className="section-title">远程文件</div>
+                  <div className="current-path" title={browserPathLabel}>
+                    {browserPathLabel}
+                  </div>
                 </div>
-              </div>
-              <div className="browser-actions">
-                <label className="checkbox-row compact-checkbox">
-                  <input
-                    checked={hideDotFiles}
-                    onChange={(event) => setHideDotFiles(event.target.checked)}
-                    type="checkbox"
-                  />
-                  <span>隐藏点文件</span>
-                </label>
-                <button
-                  disabled={!activeSession || currentDir === "/" || !currentDir}
-                  onClick={() => {
-                    if (!activeSession) {
-                      return;
-                    }
-
-                    void loadDirectory(activeSession, dirname(currentDir), {
-                      clearSelection: true
-                    });
-                  }}
-                  type="button"
-                >
-                  返回上级
-                </button>
-                <button
-                  disabled={!activeSession || !currentDir || isUploading}
-                  onClick={() => fileInputRef.current?.click()}
-                  type="button"
-                >
-                  {isUploading ? "上传中" : "上传文件"}
-                </button>
-              </div>
-            </div>
-
-            <input
-              className="hidden-file-input"
-              multiple
-              onChange={handleUploadChange}
-              ref={fileInputRef}
-              type="file"
-            />
-
-            <form className="path-bar" onSubmit={handlePathSubmit}>
-              <input
-                disabled={!activeSession}
-                onChange={(event) => setPathDraft(event.target.value)}
-                placeholder="/data/reports/project-a"
-                type="text"
-                value={pathDraft}
-              />
-              <button disabled={!activeSession || isLoadingDir} type="submit">
-                跳转
-              </button>
-            </form>
-
-            <div className="browser-tools">
-              <input
-                disabled={!activeSession}
-                onChange={(event) => setFileFilter(event.target.value)}
-                placeholder="筛选当前路径下的文件"
-                type="text"
-                value={fileFilter}
-              />
-              <span className="filter-count">{visibleEntries.length} 项</span>
-            </div>
-
-            {transferError ? (
-              <div className="panel-error transfer-feedback">{transferError}</div>
-            ) : null}
-            {!transferError && transferNotice ? (
-              <div className="transfer-feedback">{transferNotice}</div>
-            ) : null}
-
-            <div className="file-list">
-              {!visibleEntries.length ? (
-                <div className="empty-state">{emptyState}</div>
-              ) : null}
-
-              {visibleEntries.map((entry) => {
-                const isActive =
-                  selectedFile?.path === entry.path && entry.kind === "file";
-
-                return (
+                <div className="browser-actions">
+                  <label className="checkbox-row compact-checkbox">
+                    <input
+                      checked={hideDotFiles}
+                      onChange={(event) => setHideDotFiles(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <span>隐藏点文件</span>
+                  </label>
                   <button
-                    className={`file-row ${isActive ? "is-active" : ""}`}
-                    key={entry.path}
+                    disabled={!activeSession || currentDir === "/" || !currentDir}
                     onClick={() => {
                       if (!activeSession) {
                         return;
                       }
 
-                      if (entry.kind === "directory") {
-                        void loadDirectory(activeSession, entry.path, {
-                          clearSelection: true
-                        });
-                        return;
-                      }
-
-                      setSelectedFile(entry);
-                      setViewerMode("preview");
+                      void loadDirectory(activeSession, dirname(currentDir), {
+                        clearSelection: true
+                      });
                     }}
                     type="button"
                   >
-                    <span className="file-icon">
-                      {formatEntryBadge(entry)}
-                    </span>
-                    <span className="file-meta">
-                      <strong title={entry.name}>{entry.name}</strong>
-                      <small>{formatEntrySummary(entry)}</small>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        </section>
-
-        <div className="workspace-resizer-shell">
-          <div
-            aria-label="调整左侧文件区宽度"
-            aria-orientation="vertical"
-            aria-valuemax={maxSidebarWidth}
-            aria-valuemin={minSidebarWidth}
-            aria-valuenow={sidebarWidth}
-            className="workspace-resizer"
-            onKeyDown={handleSidebarResizeKeyDown}
-            onPointerCancel={handleSidebarResizeEnd}
-            onPointerDown={handleSidebarResizeStart}
-            onPointerMove={handleSidebarResizeMove}
-            onPointerUp={handleSidebarResizeEnd}
-            role="separator"
-            tabIndex={0}
-          />
-        </div>
-
-        <section className="viewer-column">
-          <div className="panel viewer-toolbar light-panel">
-            <div className="viewer-heading">
-              <div className="viewer-title-row">
-                <div className="section-title">{viewerTitle}</div>
-                <div
-                  aria-label="右侧视图切换"
-                  className="viewer-mode-switch"
-                  role="tablist"
-                >
-                  <button
-                    aria-selected={viewerMode === "preview"}
-                    className={viewerMode === "preview" ? "is-active" : ""}
-                    onClick={() => setViewerMode("preview")}
-                    role="tab"
-                    type="button"
-                  >
-                    预览
+                    返回上级
                   </button>
                   <button
-                    aria-selected={viewerMode === "terminal"}
-                    className={viewerMode === "terminal" ? "is-active" : ""}
-                    onClick={() => setViewerMode("terminal")}
-                    role="tab"
+                    disabled={!activeSession || !currentDir || isUploading}
+                    onClick={() => fileInputRef.current?.click()}
                     type="button"
                   >
-                    终端
+                    {isUploading ? "上传中" : "上传文件"}
                   </button>
                 </div>
               </div>
-              <div className="viewer-file-name" title={viewerPathLabel}>
-                {viewerPathLabel}
+
+              <input
+                className="hidden-file-input"
+                multiple
+                onChange={handleUploadChange}
+                ref={fileInputRef}
+                type="file"
+              />
+
+              <form className="path-bar" onSubmit={handlePathSubmit}>
+                <input
+                  disabled={!activeSession}
+                  onChange={(event) => setPathDraft(event.target.value)}
+                  placeholder="/data/reports/project-a"
+                  type="text"
+                  value={pathDraft}
+                />
+                <button disabled={!activeSession || isLoadingDir} type="submit">
+                  跳转
+                </button>
+              </form>
+
+              <div className="browser-tools">
+                <input
+                  disabled={!activeSession}
+                  onChange={(event) => setFileFilter(event.target.value)}
+                  placeholder="筛选当前路径下的文件"
+                  type="text"
+                  value={fileFilter}
+                />
+                <span className="filter-count">{visibleEntries.length} 项</span>
               </div>
-            </div>
-            <div className="viewer-controls">
-              {viewerMode === "preview" ? (
-                <>
+
+              {transferError ? (
+                <div className="panel-error transfer-feedback">{transferError}</div>
+              ) : null}
+              {!transferError && transferNotice ? (
+                <div className="transfer-feedback">{transferNotice}</div>
+              ) : null}
+
+              <div className="file-list">
+                {!visibleEntries.length ? (
+                  <div className="empty-state">{emptyState}</div>
+                ) : null}
+
+                {visibleEntries.map((entry) => {
+                  const isActive =
+                    selectedFile?.path === entry.path && entry.kind === "file";
+
+                  return (
+                    <button
+                      className={`file-row ${isActive ? "is-active" : ""}`}
+                      key={entry.path}
+                      onClick={() => {
+                        if (!activeSession) {
+                          return;
+                        }
+
+                        if (entry.kind === "directory") {
+                          void loadDirectory(activeSession, entry.path, {
+                            clearSelection: true
+                          });
+                          return;
+                        }
+
+                        setSelectedFile(entry);
+                      }}
+                      type="button"
+                    >
+                      <span className="file-icon">
+                        {formatEntryBadge(entry)}
+                      </span>
+                      <span className="file-meta">
+                        <strong title={entry.name}>{entry.name}</strong>
+                        <small>{formatEntrySummary(entry)}</small>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              </section>
+            ) : null}
+          </section>
+        ) : null}
+
+        {shellTab === "workspace" ? (
+          <div className="workspace-resizer-shell">
+            <div
+              aria-label="调整左侧文件区宽度"
+              aria-orientation="vertical"
+              aria-valuemax={maxSidebarWidth}
+              aria-valuemin={minSidebarWidth}
+              aria-valuenow={sidebarWidth}
+              className="workspace-resizer"
+              onKeyDown={handleSidebarResizeKeyDown}
+              onPointerCancel={handleSidebarResizeEnd}
+              onPointerDown={handleSidebarResizeStart}
+              onPointerMove={handleSidebarResizeMove}
+              onPointerUp={handleSidebarResizeEnd}
+              role="separator"
+              tabIndex={0}
+            />
+          </div>
+        ) : null}
+
+        <section className="viewer-column">
+          {shellTab === "server" ? (
+            <section className="panel viewer-panel light-panel server-list-panel">
+              <div className="panel-header">
+                <div>
+                  <div className="section-title">已有服务器</div>
+                  <div className="panel-subtitle">
+                    左侧列表用于点击连接，右侧用于配置和新增服务器。
+                  </div>
+                </div>
+              </div>
+
+              {activeSession ? (
+                <div className="session-summary">
+                  <strong>当前连接</strong>
+                  <span>{sessionSummary}</span>
+                  <small>{activeSession.rootPath}</small>
+                </div>
+              ) : null}
+
+              {savedProfiles.length ? (
+                <div className="server-profile-list">
+                  {savedProfiles.map((profile) => (
+                    <button
+                      className={`server-profile-card ${
+                        selectedProfileId === profile.id ||
+                        (activeSession &&
+                          activeSession.host === profile.host &&
+                          activeSession.username === profile.username &&
+                          activeSession.port === profile.port)
+                          ? "is-active"
+                          : ""
+                      }`}
+                      key={profile.id}
+                      onClick={() => {
+                        void handleQuickConnect(profile);
+                      }}
+                      type="button"
+                    >
+                      <strong>{profile.name}</strong>
+                      <span>
+                        {profile.username}@{profile.host}:{profile.port}
+                      </span>
+                      <small>
+                        {profile.authMethod === "password" ? "Password" : "SSH Key"} ·
+                        {" "}
+                        {profile.rootPath}
+                      </small>
+                      <small>
+                        {profile.authMethod === "password"
+                          ? profile.rememberPassword
+                            ? "点击后会直接使用已保存密码连接"
+                            : "如未保存密码，会先要求你在右侧补全"
+                          : "点击卡片即可直接连接"}
+                      </small>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <div className="viewer-placeholder server-empty-placeholder">
+                  还没有保存的服务器。先在右侧新增一组配置，保存后就能在这里直接点选连接。
+                </div>
+              )}
+            </section>
+          ) : shellTab === "terminal" ? (
+            <section className="panel viewer-panel light-panel terminal-page-panel">
+              <TerminalPanel
+                currentDir={currentDir}
+                session={activeSession}
+                theme={theme}
+              />
+            </section>
+          ) : (
+            <>
+              <div className="panel viewer-toolbar light-panel">
+                <div className="viewer-heading">
+                  <div className="section-title">{previewTitle}</div>
+                  <div className="viewer-file-name" title={previewPathLabel}>
+                    {previewPathLabel}
+                  </div>
+                </div>
+                <div className="viewer-controls">
                   <button
                     disabled={!selectedFile || isDownloading}
                     onClick={() => {
@@ -2082,112 +2177,108 @@ export default function App() {
                     {fitToWidth ? "已适配宽度" : "适配宽度"}
                   </button>
                   <span className="zoom-badge">{Math.round(zoom * 100)}%</span>
-                </>
-              ) : (
-                <span className="viewer-mode-note">命令在当前目录执行</span>
-              )}
-            </div>
-            {shouldShowDownloadFeedback ? (
-              downloadError ? (
-                <div className="download-feedback download-feedback-error">
-                  <div className="download-feedback-header">
-                    <strong>下载失败</strong>
-                    <button
-                      aria-label="关闭下载反馈"
-                      className="download-feedback-close"
-                      onClick={() => setIsDownloadFeedbackDismissed(true)}
-                      type="button"
-                    >
-                      关闭
-                    </button>
-                  </div>
-                  <div>{downloadError}</div>
                 </div>
-              ) : (
-                <div className="download-feedback">
-                  <div className="download-feedback-header">
-                    <div className="download-progress-meta">
-                      <div className="download-progress-copy">
-                        <strong>
-                          {downloadStatusLabel}
-                          {downloadFileName ? ` · ${downloadFileName}` : ""}
-                        </strong>
-                        {downloadDetailLabel ? (
-                          <small>{downloadDetailLabel}</small>
-                        ) : null}
+                {shouldShowDownloadFeedback ? (
+                  downloadError ? (
+                    <div className="download-feedback download-feedback-error">
+                      <div className="download-feedback-header">
+                        <strong>下载失败</strong>
+                        <button
+                          aria-label="关闭下载反馈"
+                          className="download-feedback-close"
+                          onClick={() => setIsDownloadFeedbackDismissed(true)}
+                          type="button"
+                        >
+                          关闭
+                        </button>
                       </div>
-                      <span>{downloadProgressLabel}</span>
+                      <div>{downloadError}</div>
                     </div>
-                    <button
-                      aria-label="关闭下载反馈"
-                      className="download-feedback-close"
-                      onClick={() => setIsDownloadFeedbackDismissed(true)}
-                      type="button"
-                    >
-                      关闭
-                    </button>
-                  </div>
-                  <div className="download-progress-track" aria-hidden="true">
-                    <div
-                      className={`download-progress-fill ${
-                        downloadProgressPercent === null &&
-                        downloadStatus === "downloading"
-                          ? "is-indeterminate"
-                          : ""
-                      }`}
-                      style={
-                        downloadProgressPercent === null
-                          ? undefined
-                          : {
-                              width: `${downloadProgressPercent}%`
-                            }
-                      }
-                    />
-                  </div>
-                </div>
-              )
-            ) : null}
-          </div>
-
-          <section className="panel viewer-panel light-panel">
-            {isPending ? <div className="viewer-status">目录状态更新中</div> : null}
-
-            {viewerMode === "terminal" ? (
-              <TerminalPanel currentDir={currentDir} session={activeSession} />
-            ) : !selectedFile ? (
-              <div className="viewer-placeholder">
-                选择左侧文件后，会在这里显示 PDF、PNG、HTML 或文本预览；也可以切到终端区执行远程命令。
+                  ) : (
+                    <div className="download-feedback">
+                      <div className="download-feedback-header">
+                        <div className="download-progress-meta">
+                          <div className="download-progress-copy">
+                            <strong>
+                              {downloadStatusLabel}
+                              {downloadFileName ? ` · ${downloadFileName}` : ""}
+                            </strong>
+                            {downloadDetailLabel ? (
+                              <small>{downloadDetailLabel}</small>
+                            ) : null}
+                          </div>
+                          <span>{downloadProgressLabel}</span>
+                        </div>
+                        <button
+                          aria-label="关闭下载反馈"
+                          className="download-feedback-close"
+                          onClick={() => setIsDownloadFeedbackDismissed(true)}
+                          type="button"
+                        >
+                          关闭
+                        </button>
+                      </div>
+                      <div className="download-progress-track" aria-hidden="true">
+                        <div
+                          className={`download-progress-fill ${
+                            downloadProgressPercent === null &&
+                            downloadStatus === "downloading"
+                              ? "is-indeterminate"
+                              : ""
+                          }`}
+                          style={
+                            downloadProgressPercent === null
+                              ? undefined
+                              : {
+                                  width: `${downloadProgressPercent}%`
+                                }
+                          }
+                        />
+                      </div>
+                    </div>
+                  )
+                ) : null}
               </div>
-            ) : selectedPreviewKind === "pdf" ? (
-              <PdfPreview
-                fileName={selectedFile.name}
-                fileUrl={viewerUrl}
-                fitToWidth={fitToWidth}
-                zoom={zoom}
-              />
-            ) : selectedPreviewKind === "image" ? (
-              <ImagePreview
-                alt={selectedFile.name}
-                fitToWidth={fitToWidth}
-                src={viewerUrl}
-                zoom={zoom}
-              />
-            ) : selectedPreviewKind === "html" ? (
-              <HtmlPreview
-                fileName={selectedFile.name}
-                fileUrl={htmlPreviewUrl}
-                fitToWidth={fitToWidth}
-                zoom={zoom}
-              />
-            ) : (
-              <TextPreview
-                fileName={selectedFile.name}
-                fileUrl={textPreviewUrl}
-                fitToWidth={fitToWidth}
-                zoom={zoom}
-              />
-            )}
-          </section>
+
+              <section className="panel viewer-panel light-panel">
+                {isPending ? <div className="viewer-status">目录状态更新中</div> : null}
+
+                {!selectedFile ? (
+                  <div className="viewer-placeholder">
+                    选择左侧文件后，会在这里显示 PDF、PNG、HTML 或文本预览。
+                  </div>
+                ) : selectedPreviewKind === "pdf" ? (
+                  <PdfPreview
+                    fileName={selectedFile.name}
+                    fileUrl={viewerUrl}
+                    fitToWidth={fitToWidth}
+                    zoom={zoom}
+                  />
+                ) : selectedPreviewKind === "image" ? (
+                  <ImagePreview
+                    alt={selectedFile.name}
+                    fitToWidth={fitToWidth}
+                    src={viewerUrl}
+                    zoom={zoom}
+                  />
+                ) : selectedPreviewKind === "html" ? (
+                  <HtmlPreview
+                    fileName={selectedFile.name}
+                    fileUrl={htmlPreviewUrl}
+                    fitToWidth={fitToWidth}
+                    zoom={zoom}
+                  />
+                ) : (
+                  <TextPreview
+                    fileName={selectedFile.name}
+                    fileUrl={textPreviewUrl}
+                    fitToWidth={fitToWidth}
+                    zoom={zoom}
+                  />
+                )}
+              </section>
+            </>
+          )}
         </section>
       </main>
     </div>

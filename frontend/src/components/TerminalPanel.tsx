@@ -1,102 +1,145 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FitAddon } from "@xterm/addon-fit";
+import { useEffect, useRef } from "react";
+import { Terminal } from "xterm";
+import "xterm/css/xterm.css";
 import type { ActiveSession, TerminalCommandResponse } from "../types";
+
+type ThemeMode = "light" | "dark";
 
 type TerminalPanelProps = {
   currentDir: string;
   session: ActiveSession | null;
+  theme: ThemeMode;
 };
 
-type TerminalHistoryEntry = TerminalCommandResponse & {
-  id: string;
-  requestedAt: number;
-};
-
-const quickCommands = [
-  { command: "pwd", label: "pwd" },
-  { command: "ls -la", label: "ls -la" },
-  { command: "df -h .", label: "df -h ." }
-];
-
-function createHistoryId(): string {
-  return `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+function getTerminalTheme(theme: ThemeMode) {
+  return theme === "dark"
+    ? {
+        background: "#071018",
+        foreground: "#e7eef4",
+        cursor: "#d08a69",
+        cursorAccent: "#071018",
+        selectionBackground: "rgba(208, 138, 105, 0.26)"
+      }
+    : {
+        background: "#101923",
+        foreground: "#e5edf4",
+        cursor: "#d08a69",
+        cursorAccent: "#101923",
+        selectionBackground: "rgba(181, 106, 76, 0.24)"
+      };
 }
 
-function formatStatus(entry: TerminalHistoryEntry): string {
-  if (entry.timedOut) {
-    return "执行超时";
-  }
-
-  if (entry.exitCode === 0) {
-    return "执行成功";
-  }
-
-  if (entry.exitCode !== null) {
-    return `退出码 ${entry.exitCode}`;
-  }
-
-  if (entry.signal) {
-    return `信号 ${entry.signal}`;
-  }
-
-  return "已完成";
+function normalizeTerminalOutput(value: string): string {
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function formatTimestamp(value: number): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false
-  }).format(value);
+function writeBlock(
+  terminal: Terminal,
+  value: string,
+  options?: { prefix?: string; suffix?: string }
+) {
+  if (!value) {
+    return;
+  }
+
+  const normalized = normalizeTerminalOutput(value);
+  const content = `${options?.prefix || ""}${normalized}${options?.suffix || ""}`;
+
+  terminal.write(content.replace(/\n/g, "\r\n"));
+
+  if (!content.endsWith("\n")) {
+    terminal.write("\r\n");
+  }
 }
 
-export function TerminalPanel({ currentDir, session }: TerminalPanelProps) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const [command, setCommand] = useState("");
-  const [error, setError] = useState("");
-  const [history, setHistory] = useState<TerminalHistoryEntry[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
+function writeSystemLine(
+  terminal: Terminal,
+  message: string,
+  tone: "info" | "warning" | "error" = "info"
+) {
+  const color =
+    tone === "warning"
+      ? "\x1b[38;5;221m"
+      : tone === "error"
+        ? "\x1b[38;5;203m"
+        : "\x1b[38;5;145m";
+
+  terminal.writeln(`${color}${message}\x1b[0m`);
+}
+
+function createPrompt(session: ActiveSession, cwd: string): string {
+  return `${session.username}@${session.hostname}:${cwd}$ `;
+}
+
+function eraseCurrentInput(terminal: Terminal, length: number) {
+  if (!length) {
+    return;
+  }
+
+  terminal.write("\b \b".repeat(length));
+}
+
+export function TerminalPanel({
+  currentDir,
+  session,
+  theme
+}: TerminalPanelProps) {
+  const terminalHostRef = useRef<HTMLDivElement | null>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const inputBufferRef = useRef("");
+  const commandHistoryRef = useRef<string[]>([]);
+  const historyIndexRef = useRef(0);
+  const isRunningRef = useRef(false);
+  const sessionRef = useRef<ActiveSession | null>(session);
+  const currentDirRef = useRef(currentDir);
 
   const effectiveCwd = currentDir || session?.rootPath || "/";
 
-  useEffect(() => {
-    setCommand("");
-    setError("");
-    setHistory([]);
-    setIsRunning(false);
-  }, [session?.sessionId]);
+  function showPrompt() {
+    const terminal = terminalRef.current;
+    const activeSession = sessionRef.current;
+    const cwd = currentDirRef.current || activeSession?.rootPath || "/";
 
-  useEffect(() => {
-    const element = scrollRef.current;
-
-    if (!element) {
+    if (!terminal || !activeSession) {
       return;
     }
 
-    element.scrollTop = element.scrollHeight;
-  }, [history]);
+    inputBufferRef.current = "";
+    historyIndexRef.current = commandHistoryRef.current.length;
+    terminal.write(createPrompt(activeSession, cwd));
+  }
 
-  async function runCommand(nextCommand?: string) {
-    if (!session || isRunning) {
+  function replaceInput(nextValue: string) {
+    const terminal = terminalRef.current;
+
+    if (!terminal) {
       return;
     }
 
-    const commandToRun = (nextCommand ?? command).trim();
+    eraseCurrentInput(terminal, inputBufferRef.current.length);
+    inputBufferRef.current = nextValue;
+    terminal.write(nextValue);
+  }
 
-    if (!commandToRun) {
-      setError("请输入要执行的命令");
+  async function runCommand(command: string) {
+    const terminal = terminalRef.current;
+    const activeSession = sessionRef.current;
+    const cwd = currentDirRef.current || activeSession?.rootPath || "/";
+
+    if (!terminal || !activeSession) {
       return;
     }
 
-    setError("");
-    setIsRunning(true);
+    isRunningRef.current = true;
 
     try {
       const response = await fetch("/api/terminal/exec", {
         body: JSON.stringify({
-          command: commandToRun,
-          cwd: effectiveCwd,
-          sessionId: session.sessionId
+          command,
+          cwd,
+          sessionId: activeSession.sessionId
         }),
         headers: {
           "Content-Type": "application/json"
@@ -111,159 +154,203 @@ export function TerminalPanel({ currentDir, session }: TerminalPanelProps) {
         throw new Error(payload?.error || `命令执行失败: ${response.status}`);
       }
 
-      const payload = (await response.json()) as TerminalCommandResponse;
+      const result = (await response.json()) as TerminalCommandResponse;
 
-      setHistory((value) => [
-        ...value,
-        {
-          ...payload,
-          id: createHistoryId(),
-          requestedAt: Date.now()
-        }
-      ]);
+      if (result.stdout) {
+        writeBlock(terminal, result.stdout);
+      }
 
-      if (!nextCommand) {
-        setCommand("");
+      if (result.stderr) {
+        writeBlock(terminal, result.stderr, {
+          prefix: "\x1b[38;5;203m",
+          suffix: "\x1b[0m"
+        });
+      }
+
+      if (!result.stdout && !result.stderr) {
+        writeSystemLine(terminal, "命令没有返回可显示的输出。");
+      }
+
+      if (result.stdoutTruncated || result.stderrTruncated) {
+        writeSystemLine(terminal, "输出过长，当前仅保留前 128 KB 内容。", "warning");
+      }
+
+      if (result.timedOut) {
+        writeSystemLine(terminal, "命令超过 20 秒，已尝试中止远程执行。", "warning");
       }
     } catch (executionError) {
-      setError(
+      writeSystemLine(
+        terminal,
         executionError instanceof Error
           ? executionError.message
-          : "命令执行失败"
+          : "命令执行失败",
+        "error"
       );
     } finally {
-      setIsRunning(false);
+      isRunningRef.current = false;
+      showPrompt();
+      fitAddonRef.current?.fit();
+      terminal.focus();
     }
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    void runCommand();
-  }
+  useEffect(() => {
+    const element = terminalHostRef.current;
+
+    if (!element) {
+      return;
+    }
+
+    const terminal = new Terminal({
+      allowProposedApi: false,
+      convertEol: true,
+      cursorBlink: true,
+      fontFamily: '"JetBrains Mono", "IBM Plex Mono", monospace',
+      fontSize: 13,
+      lineHeight: 1.45,
+      scrollback: 6000,
+      theme: getTerminalTheme(theme)
+    });
+    const fitAddon = new FitAddon();
+    const resizeObserver = new ResizeObserver(() => {
+      fitAddon.fit();
+    });
+
+    terminal.loadAddon(fitAddon);
+    terminal.open(element);
+    fitAddon.fit();
+    resizeObserver.observe(element);
+
+    const disposable = terminal.onData((data) => {
+      if (isRunningRef.current || !sessionRef.current) {
+        return;
+      }
+
+      if (data === "\r") {
+        const command = inputBufferRef.current.trim();
+
+        terminal.write("\r\n");
+
+        if (!command) {
+          showPrompt();
+          return;
+        }
+
+        commandHistoryRef.current.push(command);
+        historyIndexRef.current = commandHistoryRef.current.length;
+        inputBufferRef.current = "";
+        void runCommand(command);
+        return;
+      }
+
+      if (data === "\u007f") {
+        if (!inputBufferRef.current) {
+          return;
+        }
+
+        inputBufferRef.current = inputBufferRef.current.slice(0, -1);
+        terminal.write("\b \b");
+        return;
+      }
+
+      if (data === "\u0003") {
+        eraseCurrentInput(terminal, inputBufferRef.current.length);
+        inputBufferRef.current = "";
+        terminal.write("^C\r\n");
+        showPrompt();
+        return;
+      }
+
+      if (data === "\u000c") {
+        terminal.reset();
+        terminal.options.theme = getTerminalTheme(theme);
+        showPrompt();
+        return;
+      }
+
+      if (data === "\u001b[A") {
+        if (!commandHistoryRef.current.length || historyIndexRef.current <= 0) {
+          return;
+        }
+
+        historyIndexRef.current -= 1;
+        replaceInput(commandHistoryRef.current[historyIndexRef.current] || "");
+        return;
+      }
+
+      if (data === "\u001b[B") {
+        if (!commandHistoryRef.current.length) {
+          return;
+        }
+
+        historyIndexRef.current = Math.min(
+          historyIndexRef.current + 1,
+          commandHistoryRef.current.length
+        );
+        replaceInput(
+          commandHistoryRef.current[historyIndexRef.current] || ""
+        );
+        return;
+      }
+
+      if (/^[\x20-\x7e]$/.test(data)) {
+        inputBufferRef.current += data;
+        terminal.write(data);
+      }
+    });
+
+    terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+
+    return () => {
+      disposable.dispose();
+      resizeObserver.disconnect();
+      terminal.dispose();
+      terminalRef.current = null;
+      fitAddonRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!terminalRef.current) {
+      return;
+    }
+
+    terminalRef.current.options.theme = getTerminalTheme(theme);
+  }, [theme]);
+
+  useEffect(() => {
+    sessionRef.current = session;
+    currentDirRef.current = effectiveCwd;
+
+    const terminal = terminalRef.current;
+
+    if (!terminal) {
+      return;
+    }
+
+    terminal.options.theme = getTerminalTheme(theme);
+    terminal.reset();
+    inputBufferRef.current = "";
+    fitAddonRef.current?.fit();
+
+    if (!session) {
+      writeSystemLine(terminal, "未连接到服务器，请先在服务器页建立连接。");
+      return;
+    }
+
+    showPrompt();
+    terminal.focus();
+  }, [session?.sessionId]);
+
+  useEffect(() => {
+    currentDirRef.current = effectiveCwd;
+  }, [effectiveCwd]);
 
   return (
-    <div className="preview-surface">
-      <div className="pdf-toolbar terminal-toolbar">
-        <div className="pdf-toolbar-title">远程命令行</div>
-        <div className="pdf-toolbar-controls terminal-toolbar-controls">
-          <span className="terminal-path" title={effectiveCwd}>
-            {effectiveCwd}
-          </span>
-          <button
-            disabled={!history.length}
-            onClick={() => {
-              setHistory([]);
-              setError("");
-            }}
-            type="button"
-          >
-            清空输出
-          </button>
-        </div>
-      </div>
-
-      <form className="terminal-form" onSubmit={handleSubmit}>
-        <label className="terminal-input-shell">
-          <span className="terminal-prompt">
-            {session
-              ? `${session.username}@${session.hostname}`
-              : "未连接"}
-          </span>
-          <input
-            className="terminal-input"
-            disabled={!session || isRunning}
-            onChange={(event) => setCommand(event.target.value)}
-            placeholder="输入命令，例如 tail -n 50 app.log"
-            spellCheck={false}
-            type="text"
-            value={command}
-          />
-        </label>
-        <button disabled={!session || isRunning} type="submit">
-          {isRunning ? "执行中" : "执行"}
-        </button>
-      </form>
-
-      <div className="terminal-quick-actions">
-        {quickCommands.map((item) => (
-          <button
-            className="quick-command-button"
-            disabled={!session || isRunning}
-            key={item.command}
-            onClick={() => {
-              void runCommand(item.command);
-            }}
-            type="button"
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-
-      {error ? <div className="preview-error">{error}</div> : null}
-
-      <div className="preview-stage terminal-stage" ref={scrollRef}>
-        {!session ? (
-          <div className="terminal-empty">先建立 SSH 会话，再在当前目录执行命令。</div>
-        ) : !history.length ? (
-          <div className="terminal-empty">
-            命令会在当前浏览目录执行。可以直接输入命令，也可以点上面的快捷查询。
-          </div>
-        ) : (
-          <div className="terminal-log">
-            {history.map((entry) => {
-              const statusClass =
-                entry.exitCode === 0 && !entry.timedOut
-                  ? "is-success"
-                  : "is-error";
-
-              return (
-                <article className="terminal-entry" key={entry.id}>
-                  <div className="terminal-entry-header">
-                    <div className="terminal-command-line">
-                      <span className="terminal-command-prompt">
-                        {session.username}@{session.hostname}:{entry.cwd}$
-                      </span>
-                      <span>{entry.command}</span>
-                    </div>
-                    <span className={`terminal-entry-status ${statusClass}`}>
-                      {formatStatus(entry)}
-                    </span>
-                  </div>
-                  <div className="terminal-entry-meta">
-                    {formatTimestamp(entry.requestedAt)}
-                  </div>
-
-                  {entry.stdout ? (
-                    <pre className="terminal-stream">{entry.stdout}</pre>
-                  ) : null}
-                  {entry.stderr ? (
-                    <pre className="terminal-stream is-error">{entry.stderr}</pre>
-                  ) : null}
-                  {!entry.stdout && !entry.stderr ? (
-                    <div className="terminal-note">命令没有返回可显示的输出。</div>
-                  ) : null}
-                  {entry.stdoutTruncated || entry.stderrTruncated ? (
-                    <div className="terminal-note">
-                      输出过长，当前仅保留前 128 KB 内容。
-                    </div>
-                  ) : null}
-                  {entry.timedOut ? (
-                    <div className="terminal-note">
-                      命令超过 20 秒，已尝试中止远程执行。
-                    </div>
-                  ) : null}
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <div className="preview-meta">
-        {session
-          ? "终端区基于当前文件浏览路径执行单次命令，适合查日志、看进程和做快速排查。"
-          : "连接建立后可在这里执行远程命令。"}
+    <div className="preview-surface terminal-shell">
+      <div className="terminal-stage">
+        <div className="terminal-viewport" ref={terminalHostRef} />
       </div>
     </div>
   );
