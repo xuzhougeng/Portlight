@@ -44,10 +44,10 @@ const (
 )
 
 var (
-	htmlBaseHrefRe = regexp.MustCompile(`(?i)<base\b([^>]*?)href=(["'])(.*?)\2([^>]*)>`)
-	htmlSrcsetRe   = regexp.MustCompile(`(?i)\bsrcset=(["'])(.*?)\1`)
-	htmlAttrRe     = regexp.MustCompile(`(?i)\b(src|href|poster|action)=(["'])(.*?)\2`)
-	htmlCSSURLRe   = regexp.MustCompile(`(?i)url\((["']?)(/[^)"']*)\1\)`)
+	htmlBaseHrefRe = regexp.MustCompile(`(?i)<base\b([^>]*?)href=(?:"([^"]*)"|'([^']*)')([^>]*)>`)
+	htmlSrcsetRe   = regexp.MustCompile(`(?i)\bsrcset=(?:"([^"]*)"|'([^']*)')`)
+	htmlAttrRe     = regexp.MustCompile(`(?i)\b(src|href|poster|action)=(?:"([^"]*)"|'([^']*)')`)
+	htmlCSSURLRe   = regexp.MustCompile(`(?i)url\((?:"(/[^)"]*)"|'(/[^)']*)'|(/[^)"']*))\)`)
 )
 
 type ServerOptions struct {
@@ -1493,23 +1493,46 @@ func rewriteHTMLSrcset(value string, sessionID string) string {
 	return strings.Join(parts, ", ")
 }
 
+func selectQuotedValue(doubleQuoted string, singleQuoted string) (string, string) {
+	if doubleQuoted != "" {
+		return `"`, doubleQuoted
+	}
+	if singleQuoted != "" {
+		return `'`, singleQuoted
+	}
+	return `"`, ""
+}
+
+func selectWrappedReference(doubleQuoted string, singleQuoted string, plain string) (string, string, string) {
+	if doubleQuoted != "" {
+		return `"`, doubleQuoted, `"`
+	}
+	if singleQuoted != "" {
+		return `'`, singleQuoted, `'`
+	}
+	return "", plain, ""
+}
+
 func rewriteHTMLPreviewDocument(content string, sessionID string, remotePath string) string {
 	currentDir := path.Dir(remotePath)
 	content = replaceAllRegexpString(content, htmlBaseHrefRe, func(match []string) string {
-		return fmt.Sprintf("<base%shref=%s%s%s%s>", match[1], match[2], rewriteHTMLBaseReference(match[3], sessionID, currentDir), match[2], match[4])
+		quote, href := selectQuotedValue(match[2], match[3])
+		return fmt.Sprintf("<base%shref=%s%s%s%s>", match[1], quote, rewriteHTMLBaseReference(href, sessionID, currentDir), quote, match[4])
 	})
 	content = replaceAllRegexpString(content, htmlSrcsetRe, func(match []string) string {
-		return fmt.Sprintf("srcset=%s%s%s", match[1], rewriteHTMLSrcset(match[2], sessionID), match[1])
+		quote, srcset := selectQuotedValue(match[1], match[2])
+		return fmt.Sprintf("srcset=%s%s%s", quote, rewriteHTMLSrcset(srcset, sessionID), quote)
 	})
 	content = replaceAllRegexpString(content, htmlAttrRe, func(match []string) string {
-		return fmt.Sprintf("%s=%s%s%s", match[1], match[2], rewriteHTMLAbsoluteReference(match[3], sessionID), match[2])
+		quote, target := selectQuotedValue(match[2], match[3])
+		return fmt.Sprintf("%s=%s%s%s", match[1], quote, rewriteHTMLAbsoluteReference(target, sessionID), quote)
 	})
 	content = replaceAllRegexpString(content, htmlCSSURLRe, func(match []string) string {
-		target := match[2]
+		prefix, target, suffix := selectWrappedReference(match[1], match[2], match[3])
 		if strings.HasPrefix(target, "//") {
 			return match[0]
 		}
-		return fmt.Sprintf("url(%s%s%s)", match[1], buildHTMLPreviewProxyPath(sessionID, target), match[1])
+		return fmt.Sprintf("url(%s%s%s)", prefix, buildHTMLPreviewProxyPath(sessionID, target), suffix)
 	})
 	return content
 }
