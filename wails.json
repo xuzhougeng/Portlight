@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Portlight",
+  "outputfilename": "Portlight",
+  "frontend:dir": "frontend",
+  "frontend:install": "npm ci",
+  "frontend:build": "npm run build",
+  "nsisType": "multiple",
+  "author": {
+    "name": "xuzhougeng",
+    "email": ""
+  },
+  "info": {
+    "companyName": "xuzhougeng",
+    "productName": "Portlight",
+    "productVersion": "0.1.0",
+    "comments": "Lightweight SSH workbench built with Go and Wails."
+  }
+}

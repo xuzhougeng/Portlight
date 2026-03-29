@@ -1,0 +1,8 @@
+frontend/node_modules/
+build/bin/
+build/windows/installer/tmp/
+build/windows/installer/wails_tools.nsh
+Portlight-res.syso
+*.out
+*.exe
+.DS_Store
