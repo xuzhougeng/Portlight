@@ -1455,7 +1455,7 @@ export default function App() {
       <aside className="app-nav">
         <div className="app-nav-header">
           <div className="app-nav-title">Portlight</div>
-          <div className="app-nav-tagline">Wails desktop shell</div>
+          <div className="app-nav-tagline">SSH Workbench</div>
         </div>
 
         <nav className="app-nav-list" aria-label="主导航">
@@ -1500,30 +1500,23 @@ export default function App() {
       <div className="app-main">
     <div className={`shell theme-${theme} shell-tab-${shellTab}`}>
       <header className="topbar">
-        <div className="topbar-copy">
-          <p className="eyebrow">Lightweight SSH Workbench</p>
-            <div className="topbar-headline">
-              <h1>远程文件浏览器</h1>
-              <div className="topbar-controls">
-                <div className="topbar-pills">
-                  <span>Wails + Go</span>
-                  <span>SSH Key / Password</span>
-                  <span>上传 · 下载 · 预览 · 终端</span>
-                </div>
-                <button
-                  className="theme-toggle"
-                  onClick={() =>
-                    setTheme((value) => (value === "light" ? "dark" : "light"))
-                  }
-                  type="button"
-                >
-                  {theme === "light" ? "切到深色" : "切到浅色"}
-                </button>
-              </div>
-            </div>
-            <p className="topbar-note">
-            通过 Go SSH/SFTP 建立远程会话，保留原有浏览、上传、下载、预览与远程命令能力；桌面壳切换为 Wails，去掉 Electron 的笨重依赖。
-            </p>
+          <div className="topbar-status">
+            {activeSession ? (
+              <span className="topbar-session-badge">{sessionSummary}</span>
+            ) : (
+              <span className="topbar-session-badge is-idle">未连接</span>
+            )}
+          </div>
+          <div className="topbar-controls">
+            <button
+              className="theme-toggle"
+              onClick={() =>
+                setTheme((value) => (value === "light" ? "dark" : "light"))
+              }
+              type="button"
+            >
+              {theme === "light" ? "深色" : "浅色"}
+            </button>
           </div>
         </header>
 
