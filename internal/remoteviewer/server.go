@@ -126,6 +126,7 @@ type sessionRecord struct {
 	id         string
 	lastUsedAt time.Time
 	port       int
+	rootPath   string
 	username   string
 }
 
@@ -798,7 +799,12 @@ func (s *Server) handleHTMLPreview(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(rewriteHTMLPreviewDocument(string(content), session.id, resolvedPath)))
+		_, _ = w.Write([]byte(rewriteHTMLPreviewDocument(
+			string(content),
+			session.id,
+			resolvedPath,
+			deriveHTMLPreviewRoot(session.rootPath, resolvedPath),
+		)))
 		return
 	}
 
@@ -902,6 +908,7 @@ func (s *Server) createSession(config connectionConfig) (*sessionRecord, error) 
 		id:         randomID(),
 		lastUsedAt: time.Now(),
 		port:       port,
+		rootPath:   normalizeRemoteRoutePath(ternary(strings.TrimSpace(target.RootPath) != "", target.RootPath, "/")),
 		username:   target.Username,
 	}
 
@@ -1216,10 +1223,7 @@ func executeRemoteCommand(session *sessionRecord, request terminalExecRequest) (
 		_, _ = io.Copy(stderrBuf, stderrPipe)
 	}()
 
-	shellCommand := fmt.Sprintf("sh -lc %s", escapePosixShellArgument(
-		fmt.Sprintf("cd -- %s && %s", escapePosixShellArgument(request.Cwd), request.Command),
-	))
-	if err := sshSession.Start(shellCommand); err != nil {
+	if err := sshSession.Start(buildRemoteExecCommand(request.Cwd, request.Command)); err != nil {
 		return terminalExecResult{}, err
 	}
 
@@ -1274,6 +1278,10 @@ func executeRemoteCommand(session *sessionRecord, request terminalExecRequest) (
 		StdoutTruncated: stdoutBuf.truncated,
 		TimedOut:        timedOut,
 	}, nil
+}
+
+func buildRemoteExecCommand(cwd string, command string) string {
+	return fmt.Sprintf("cd -- %s && %s", escapePosixShellArgument(cwd), command)
 }
 
 func parseDirectoryListing(currentDir string, entries []os.FileInfo) []remoteEntry {
@@ -1444,6 +1452,30 @@ func buildHTMLPreviewProxyPath(sessionID string, remotePath string) string {
 	return "/api/html-preview/" + pathEscape(sessionID) + strings.Join(segments, "/")
 }
 
+func deriveHTMLPreviewRoot(sessionRootPath string, remotePath string) string {
+	normalizedSessionRoot := normalizeRemoteRoutePath(sessionRootPath)
+	normalizedRemotePath := normalizeRemoteRoutePath(remotePath)
+
+	if normalizedSessionRoot == "/" {
+		return normalizedSessionRoot
+	}
+	if normalizedRemotePath == normalizedSessionRoot ||
+		strings.HasPrefix(normalizedRemotePath, normalizedSessionRoot+"/") {
+		return normalizedSessionRoot
+	}
+	return "/"
+}
+
+func resolveHTMLAbsoluteRemotePath(previewRoot string, value string) string {
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+		return value
+	}
+	if previewRoot == "" || previewRoot == "/" {
+		return normalizeRemoteRoutePath(value)
+	}
+	return normalizeRemoteRoutePath(path.Join(previewRoot, strings.TrimPrefix(value, "/")))
+}
+
 func isSpecialURLReference(value string) bool {
 	if value == "" || strings.HasPrefix(value, "#") || strings.HasPrefix(value, "//") {
 		return true
@@ -1451,21 +1483,21 @@ func isSpecialURLReference(value string) bool {
 	return regexp.MustCompile(`^[a-z][a-z\d+\-.]*:`).MatchString(strings.ToLower(value))
 }
 
-func rewriteHTMLAbsoluteReference(value string, sessionID string) string {
+func rewriteHTMLAbsoluteReference(value string, sessionID string, previewRoot string) string {
 	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
 		return value
 	}
-	return buildHTMLPreviewProxyPath(sessionID, value)
+	return buildHTMLPreviewProxyPath(sessionID, resolveHTMLAbsoluteRemotePath(previewRoot, value))
 }
 
-func rewriteHTMLBaseReference(value string, sessionID string, currentDir string) string {
+func rewriteHTMLBaseReference(value string, sessionID string, currentDir string, previewRoot string) string {
 	if isSpecialURLReference(value) {
 		return value
 	}
 	trailingSlash := strings.HasSuffix(value, "/")
 	resolvedPath := value
 	if strings.HasPrefix(value, "/") {
-		resolvedPath = normalizeRemoteRoutePath(value)
+		resolvedPath = resolveHTMLAbsoluteRemotePath(previewRoot, value)
 	} else {
 		resolvedPath = path.Clean(path.Join(currentDir, value))
 	}
@@ -1476,7 +1508,7 @@ func rewriteHTMLBaseReference(value string, sessionID string, currentDir string)
 	return proxiedPath
 }
 
-func rewriteHTMLSrcset(value string, sessionID string) string {
+func rewriteHTMLSrcset(value string, sessionID string, previewRoot string) string {
 	parts := strings.Split(value, ",")
 	for index, entry := range parts {
 		trimmed := strings.TrimSpace(entry)
@@ -1487,7 +1519,7 @@ func rewriteHTMLSrcset(value string, sessionID string) string {
 		if len(fields) == 0 {
 			continue
 		}
-		fields[0] = rewriteHTMLAbsoluteReference(fields[0], sessionID)
+		fields[0] = rewriteHTMLAbsoluteReference(fields[0], sessionID, previewRoot)
 		parts[index] = strings.Join(fields, " ")
 	}
 	return strings.Join(parts, ", ")
@@ -1513,26 +1545,44 @@ func selectWrappedReference(doubleQuoted string, singleQuoted string, plain stri
 	return "", plain, ""
 }
 
-func rewriteHTMLPreviewDocument(content string, sessionID string, remotePath string) string {
+func rewriteHTMLPreviewDocument(content string, sessionID string, remotePath string, previewRoot string) string {
 	currentDir := path.Dir(remotePath)
 	content = replaceAllRegexpString(content, htmlBaseHrefRe, func(match []string) string {
 		quote, href := selectQuotedValue(match[2], match[3])
-		return fmt.Sprintf("<base%shref=%s%s%s%s>", match[1], quote, rewriteHTMLBaseReference(href, sessionID, currentDir), quote, match[4])
+		return fmt.Sprintf(
+			"<base%shref=%s%s%s%s>",
+			match[1],
+			quote,
+			rewriteHTMLBaseReference(href, sessionID, currentDir, previewRoot),
+			quote,
+			match[4],
+		)
 	})
 	content = replaceAllRegexpString(content, htmlSrcsetRe, func(match []string) string {
 		quote, srcset := selectQuotedValue(match[1], match[2])
-		return fmt.Sprintf("srcset=%s%s%s", quote, rewriteHTMLSrcset(srcset, sessionID), quote)
+		return fmt.Sprintf("srcset=%s%s%s", quote, rewriteHTMLSrcset(srcset, sessionID, previewRoot), quote)
 	})
 	content = replaceAllRegexpString(content, htmlAttrRe, func(match []string) string {
 		quote, target := selectQuotedValue(match[2], match[3])
-		return fmt.Sprintf("%s=%s%s%s", match[1], quote, rewriteHTMLAbsoluteReference(target, sessionID), quote)
+		return fmt.Sprintf(
+			"%s=%s%s%s",
+			match[1],
+			quote,
+			rewriteHTMLAbsoluteReference(target, sessionID, previewRoot),
+			quote,
+		)
 	})
 	content = replaceAllRegexpString(content, htmlCSSURLRe, func(match []string) string {
 		prefix, target, suffix := selectWrappedReference(match[1], match[2], match[3])
 		if strings.HasPrefix(target, "//") {
 			return match[0]
 		}
-		return fmt.Sprintf("url(%s%s%s)", prefix, buildHTMLPreviewProxyPath(sessionID, target), suffix)
+		return fmt.Sprintf(
+			"url(%s%s%s)",
+			prefix,
+			buildHTMLPreviewProxyPath(sessionID, resolveHTMLAbsoluteRemotePath(previewRoot, target)),
+			suffix,
+		)
 	})
 	return content
 }
@@ -1718,7 +1768,7 @@ func pathEscape(value string) string {
 }
 
 func escapePosixShellArgument(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'\"'\"'`) + "'"
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func ternary[T any](condition bool, whenTrue T, whenFalse T) T {
